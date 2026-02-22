@@ -17,6 +17,10 @@ const REWARDS = {
   },
 };
 
+// In-memory queue for Smart Bin "open" commands
+// Each item: { id, studentId }
+const binCommandQueue = [];
+
 /**
  * POST /api/iot/bottle-event
  * body: { studentId, bottles }
@@ -65,7 +69,7 @@ export const recordBottleEvent = async (req, res) => {
       return res.status(500).json({ error: "Failed to update student" });
     }
 
-    // 3) (Optional) log into bin_events if you created that table
+    // 3) Log into bin_events
     try {
       await supabase.from("bin_events").insert([
         {
@@ -126,9 +130,6 @@ export const getRedeemStatus = async (req, res) => {
 /**
  * POST /api/iot/redeem
  * body: { studentId, rewardKey }
- * - Checks points
- * - Ensures there is no existing PENDING redemption for this reward
- * - Deducts points & inserts a new reward_redemptions row with status 'pending'
  */
 export const redeemReward = async (req, res) => {
   const { studentId, rewardKey } = req.body;
@@ -200,7 +201,9 @@ export const redeemReward = async (req, res) => {
 
     if (updateError) {
       console.error("Supabase update points error:", updateError);
-      return res.status(500).json({ error: "Failed to update student points" });
+      return res
+        .status(500)
+        .json({ error: "Failed to update student points" });
     }
 
     // 4) Insert redemption record
@@ -234,9 +237,10 @@ export const redeemReward = async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 };
-// src/controller/iotController.js  (ADD THIS)
 
-// GET /api/iot/activity/:studentId?limit=5
+/**
+ * GET /api/iot/activity/:studentId?limit=5
+ */
 export const getRecentActivity = async (req, res) => {
   const { studentId } = req.params;
   const limit = parseInt(req.query.limit, 10) || 5;
@@ -309,4 +313,47 @@ export const getRecentActivity = async (req, res) => {
     console.error("Unexpected recent activity error:", err);
     return res.status(500).json({ error: "Server error" });
   }
+};
+
+/**
+ * Student clicks "Insert bottle" on the web app
+ * POST /api/iot/open-request
+ */
+export const requestOpenBin = (req, res) => {
+  const { studentId } = req.body || {};
+
+  if (!studentId) {
+    return res.status(400).json({ error: "studentId is required" });
+  }
+
+  const command = {
+    id: Date.now().toString(),
+    studentId,
+  };
+
+  binCommandQueue.push(command);
+
+  console.log("Queued open-bin command:", command);
+
+  return res.json({
+    message: "Insert request queued. Waiting for Smart Bin...",
+    commandId: command.id,
+  });
+};
+
+/**
+ * ESP32 polls this to get the next studentId to service
+ * GET /api/iot/next-open-request
+ */
+export const getNextOpenRequest = (req, res) => {
+  if (binCommandQueue.length === 0) {
+    // No pending command
+    return res.status(204).end(); // 204 = No Content
+  }
+
+  const command = binCommandQueue.shift();
+  console.log("Smart Bin claimed command:", command);
+
+  // For ESP32 we keep it super simple: plain text = studentId
+  return res.status(200).type("text/plain").send(command.studentId);
 };
